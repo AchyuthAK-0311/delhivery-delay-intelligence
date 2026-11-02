@@ -42,7 +42,58 @@ A mean sitting far above the median means a handful of very high-value parcels w
 
 ## Model results (regression)
 
-_Added in Part B._
+The table was split 840 / 180 / 180 rows for training, validation and test (`outputs/part_b_checks.csv`). The scaler used for the leakage check was fitted on the 840 training rows only: the largest absolute column mean of the scaled training rows is **0.0**, while the same figure for the scaled test rows is **0.2187**. A test-row mean that is clearly off zero is the proof that no test statistic was used to fit the scaler, which is what makes the test score below an honest estimate rather than a rehearsal.
+
+All five candidates below were fitted on the training rows and scored on the same 180-row validation split (`outputs/part_b_metrics.csv`).
+
+| model | MAE | MSE | RMSE | R² |
+| --- | --- | --- | --- | --- |
+| mean_baseline | 15.7952 | 355.5204 | 18.8552 | -0.0212 |
+| linear_regression | 3.9222 | 23.9235 | 4.8912 | 0.9313 |
+| decision_tree | 5.0971 | 39.4338 | 6.2796 | 0.8867 |
+| random_forest | 4.2882 | 30.355 | 5.5095 | 0.9128 |
+| gradient_boosting | 3.9166 | 24.1722 | 4.9165 | 0.9306 |
+
+### The baseline explains nothing
+
+Predicting the training mean for every parcel gives an R² of **-0.0212** and an RMSE of **18.8552** hours (`outputs/part_b_metrics.csv`). R² is the share of variation in delivery hours the model explains, so a slightly negative value means this rule explains none of it and does marginally worse than the validation rows' own average would. A planner working from "the average parcel takes about the average time" is off by **15.7952** hours on a typical parcel (MAE), which is far too coarse to commit to a 36-hour or 60-hour promise, and it sets the bar every model below has to clear to be worth running at all.
+
+### Linear regression won on validation
+
+`linear_regression` has the lowest validation RMSE at **4.8912** hours, just ahead of `gradient_boosting` at **4.9165**, then `random_forest` at **5.5095** and `decision_tree` at **6.2796** (`outputs/part_b_metrics.csv`). Its R² of **0.9313** means it explains most of the variation in delivery hours. In operational terms a typical estimate lands within about five hours of the real outcome, which is tight enough to plan a dispatch slot against a 36-hour Express promise, though not tight enough to treat a parcel sitting within five hours of its promise as safe.
+
+### Shallow depths are high-bias, deep ones are high-variance
+
+From `outputs/part_b_tree_depth.csv`, with the gap being `val_rmse` minus `train_rmse`:
+
+| max_depth | train_rmse | val_rmse | gap |
+| --- | --- | --- | --- |
+| 1 | 11.6334 | 12.1324 | 0.4990 |
+| 2 | 9.3687 | 10.4114 | 1.0427 |
+| 3 | 7.5295 | 8.7033 | 1.1738 |
+| 4 | 6.0999 | 7.3896 | 1.2897 |
+| 6 | 4.7114 | 6.2796 | 1.5682 |
+| 8 | 3.336 | 6.7901 | 3.4541 |
+| 12 | 1.3613 | 7.354 | 5.9927 |
+| unlimited | 0.0 | 7.8368 | 7.8368 |
+
+Depths 1 to 3 are high-bias: the gap is small (0.4990 at depth 1) but both errors are high, so the tree is not failing to generalise, it is simply too simple to describe the data — a depth-1 tree splits on one threshold and is wrong by over 11 hours even on rows it trained on. Depths 8, 12 and unlimited are high-variance: `train_rmse` keeps falling to **3.336**, **1.3613** and **0.0** while `val_rmse` rises to **6.7901**, **7.354** and **7.8368**, widening the gap to **7.8368**. The unlimited tree reproduces its training rows exactly and is still the worst of the eight on unseen parcels, which is the clearest warning against trusting a training-set score. Depth **6** is the turning point and the depth used for the `decision_tree` candidate, with the lowest validation RMSE of **6.2796**.
+
+### Learning rate 0.1 was best
+
+With 100 trees held fixed (`outputs/part_b_gb_learning_rate.csv`), 0.1 wins at validation RMSE **4.9165** and R² **0.9306**, against **10.0018** / **0.7127** at 0.01 and **7.3946** / **0.8429** at 1.0. At 0.01 each tree's correction is shrunk to a hundredth of its size, so 100 trees are not enough to walk the ensemble down to the signal — it is still underfit when the tree budget runs out, which is why its R² is the worst of the three and barely better than a shallow tree. At 1.0 each tree applies its full correction, so the ensemble overshoots the target at every step and chases the last tree's residuals instead of settling into the minimum, giving a worse validation score than 0.1 despite having exactly the same capacity. The useful operating lesson is that the tree count and the learning rate have to be chosen together: a smaller rate is only safe if the number of trees rises to match.
+
+### Cross-validation disagrees with validation, and the gap is small
+
+The two rankings disagree on first place. By validation RMSE: `linear_regression` (**4.8912**) then `gradient_boosting` (**4.9165**). By 5-fold cross-validated mean R² on the 1,020 training-plus-validation rows: `gradient_boosting` (**0.9353**, std **0.0045**) then `linear_regression` (**0.9261**, std **0.0048**) (`outputs/part_b_cv.csv`).
+
+Under the brief's rule the final model is the candidate with the lowest validation RMSE, so `linear_regression` stays the final model and is the model scored on the test rows.
+
+The model I would ship is `gradient_boosting`. Cross-validation averages five folds across 1,020 rows, so every row serves as a held-out row once, whereas the validation ranking rests on a single 180-row split; and the validation gap that put `linear_regression` first is only 0.0253 hours — about a minute and a half, well inside what one unlucky split can produce. Both cross-validation standard deviations are small (**0.0045** and **0.0048**), so the fold-to-fold ordering is stable rather than noise. For a decision this close I would rather trust the estimate built from more held-out data, and I would re-run both on a second split before changing anything in production.
+
+### The final model on the test rows
+
+Scored once on the 180 untouched test rows, `linear_regression` gives MAE **3.5671**, MSE **20.4624**, RMSE **4.5235** and R² **0.9493** (`outputs/part_b_metrics.csv`). The test score is slightly better than its validation score, which says the model is not over-tuned to the validation split. For planners this means a dispatch-time estimate of delivery hours that is typically within about three and a half hours of the real outcome, so it is dependable for scheduling and capacity work but should not be the only signal used to decide whether a single parcel will break its promise — that is the classifier's job in Part C.
 
 ## Model results (classification)
 
