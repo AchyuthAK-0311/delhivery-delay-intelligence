@@ -97,7 +97,48 @@ Scored once on the 180 untouched test rows, `linear_regression` gives MAE **3.56
 
 ## Model results (classification)
 
-_Added in Part C._
+The shipped configuration (`outputs/part_c_final_config.csv`) keeps 7 of the 17 columns with `SelectKBest` and feeds them to a random forest of 100 trees with no depth limit and `min_samples_leaf` 1, alerting when the delay probability reaches 0.5. It came from the `default_forest_same_7_features` row of the tuning table.
+
+The four models below were fitted on the 840 training rows and scored on the 180 validation rows at the default 0.5 decision rule (`outputs/part_c_models.csv`).
+
+| model | TN | FP | FN | TP | accuracy | precision | recall | f1 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| blind_all_on_time | 138 | 0 | 42 | 0 | 0.7667 | 0.0 | 0.0 | 0.0 |
+| logistic_regression | 128 | 10 | 7 | 35 | 0.9056 | 0.7778 | 0.8333 | 0.8046 |
+| decision_tree_depth_6 | 128 | 10 | 11 | 31 | 0.8833 | 0.7561 | 0.7381 | 0.747 |
+| random_forest_default | 132 | 6 | 11 | 31 | 0.9056 | 0.8378 | 0.7381 | 0.7848 |
+
+### The blind baseline scores 0.7667 and is still useless
+
+Predicting "on time" for every parcel returns an accuracy of **0.7667**, but its recall is **0.0**: it catches no delayed parcel at all. The confusion cells say it plainly — TP **0** and FN **42**, so every one of the 42 delayed parcels in the validation split walks straight past it. The accuracy only looks respectable because **138** of the 180 validation parcels really were on time, so a rule that never raises an alarm is right about those and wrong about every parcel operations actually cares about. As an alerting system it has no value whatsoever: no proactive call is ever placed and no hub manager is ever warned, which is why accuracy alone must never be the headline metric on a problem where under a quarter of parcels are positive.
+
+### The noise columns take 0.2245 of the forest's importance yet rank 8 or worse
+
+The five bookkeeping columns carry a combined **0.2245** of the forest's impurity importance — roughly a fifth of it — while every one of them falls outside the top 7 by F-score: `label_print_batch` at rank **8**, `tape_roll_no` at **12**, `sticker_serial_mod` at **14**, `shelf_slot_no` at **16** and `scanner_build_no` at **17** (`outputs/part_c_feature_scores.csv`). Their F-scores are **4.5847**, **1.9052**, **1.2776**, **0.1393** and **0.0230**, all beneath 10, against **36.7281** for the weakest of the top seven — a gap of more than three times.
+
+They still receive importance because impurity importance gives credit to columns with many distinct values even when they carry no signal. A label batch number spanning 1000 to 9999, a tape roll number up to 500 and a continuous sticker serial offer the tree hundreds of candidate split points, and with enough of them one will always happen to separate a few delayed parcels in the training rows by chance. The F-test is the better witness here because it asks a single question — do delayed and on-time parcels differ on this column — and answers no. The operational reading is that a feature-importance chart should never on its own justify collecting a field: these five are warehouse bookkeeping, and dropping them is what the selector does.
+
+### Seven columns beat all seventeen
+
+Validation F1 by number of selected columns (`outputs/part_c_selectk.csv`): **0.6988** at k=5, **0.8333** at k=7, **0.7857** at k=10, **0.8049** at k=12 and **0.7848** at k=17. The peak is at k=7 and the worst score is at k=5, so the table brackets the answer from both sides — five columns is too few and drops something that matters, while every k above 7 is readmitting bookkeeping columns and scores lower than 7 does. Using all 17 columns (**0.7848**) is worse than using the best 7 (**0.8333**), which is the concrete case for the selector staying in the pipeline rather than feeding the forest everything available.
+
+### Tuning did not beat the untuned forest on validation
+
+On the same 7 columns, validation F1 was **0.775** for the grid search and **0.7848** for the randomized search, against **0.8333** for the untuned forest (`outputs/part_c_tuning.csv`). The untuned forest won, which is why it is the shipped configuration.
+
+That ordering is not evidence that tuning does not work. The two searches optimise cross-validated accuracy on the training rows — the grid reached **0.8952** and the randomized search **0.8905** across 135 and 45 fits — while the comparison above is F1 on 180 validation rows holding only 42 delayed parcels. Those are different targets measured on different data: accuracy rewards getting the 138 on-time parcels right, F1 only tracks the delayed ones, and on a base of 42 a handful of parcels moving between TP and FN is enough to reverse the order. The honest conclusion is that this validation split is too small to resolve a difference this fine, not that the searches were a waste. Both searches sensibly converged on `max_depth` 6, and on a larger labelled history — or with the searches scored on F1 rather than accuracy — the result could easily flip back.
+
+### Threshold 0.5, chosen because 0.6 misses too many parcels
+
+The operations rule takes the highest threshold whose validation recall still reaches 0.80, because a missed delayed parcel costs more than an unnecessary call. That is **0.5**, with validation precision **0.7955** and recall **0.8333** (`outputs/part_c_thresholds.csv`): of 42 delayed parcels it catches **35** and misses **7**, at the cost of **9** false alarms.
+
+The next threshold up fails the rule outright. At **0.6** recall falls to **0.7619**, below the 0.80 floor, even though it would look better on the metrics usually quoted — precision rises to **0.8889** and F1 to **0.8205**, the best F1 in the table. Concretely, moving from 0.5 to 0.6 saves five wasted calls (FP **9** down to **4**) but lets three more delayed parcels through unwarned (FN **7** up to **10**). The rule rejects that trade deliberately, and it is the reason the alert threshold is not set by F1: on this problem the cheapest-looking threshold is not the one operations can live with.
+
+### On the test rows, recall falls to 0.7561
+
+Scored once on the 180 untouched test rows at threshold **0.5**, the final model gives precision **0.6889**, recall **0.7561** and F1 **0.7209** (`outputs/part_c_final_test.csv`). In plain operational terms, about 7 of every 10 flagged parcels really are delayed, and about 7.5 of every 10 delayed parcels get caught.
+
+Test recall of **0.7561** is lower than the validation recall of **0.8333** that the threshold was chosen on — a drop of **0.0772** — and it is below the 0.80 the operations rule asks for. That is worth stating plainly rather than hiding: the threshold was selected to clear 0.80 on one 180-row validation split, and it did not hold on the test split. The test set contains only **41** delayed parcels, so a single parcel moves recall by about **0.0244**, and the entire shortfall is **31** caught instead of the **33** that would have reached **0.8049**. A gap of two or three parcels on a base of 41 is well within what one split can produce, so this is not evidence the model is broken — but it is also not a result to explain away. The correct response is not to re-tune the threshold against the test rows, which would destroy the only honest estimate in the repository; it is to hold 0.5, report recall as approximately 0.76 to 0.83 rather than a single confident figure, and re-measure recall on real outcomes once a few hundred more delivered parcels are available.
 
 ## Operations recommendation
 
